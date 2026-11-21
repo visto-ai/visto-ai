@@ -1,11 +1,12 @@
 import type { FileContext } from '../context/build.ts';
 import type { RawBlock, RawFile, RawPart, SubmitReviewArgs } from '../model/submit-review.ts';
 import { inlineText } from '../context/untrusted.ts';
-import { SPLIT_ABOVE, fileDiffHash, linesOf, parseAnchor, splitBlock } from '../score/blocks.ts';
+import { SPLIT_ABOVE, fileDiffHash, linesOf, parseAnchor, rangeOf, splitBlock } from '../score/blocks.ts';
 import { floorFor } from '../score/floors.ts';
 import type { TeamFloors } from '../score/floors.ts';
 import { CATEGORIES } from '../score/types.ts';
-import type { Anchor, Block, BlockScore, Category, FileLevelSource, FileScore, ScoreEntry, Verdict } from '../score/types.ts';
+import type { KeptEntry } from '../score/history.ts';
+import type { Anchor, Block, BlockScore, Category, FileLevelSource, FileScore, ScoredBy, ScoreEntry, Verdict } from '../score/types.ts';
 import type { AuditEntry } from '../types.ts';
 import { normalizePath } from './placement.ts';
 
@@ -114,7 +115,7 @@ function outcomeOf(path: string, block: Block, item: RawBlock, audit: AuditEntry
     return scoredWith([{ score: blockScore(block, best.entry), voided: false }]);
   }
 
-  const out: Scored[] = split.parts.map((made, i) => ({ score: blockScore(made!, parts[i]!.entry), voided: false }));
+  const out: Scored[] = split.parts.map((made, i) => ({ score: { ...blockScore(made!, parts[i]!.entry), range: rangeOf(block, made!) }, voided: false }));
   if (split.rest !== null) out.push({ score: blockScore(split.rest, null), voided: true });
   return scoredWith(out);
 }
@@ -138,6 +139,7 @@ export function reconcileScores(
   contexts: FileContext[],
   notRead: ReadonlySet<string>,
   floors: TeamFloors,
+  by: ScoredBy = 'model',
 ): { scores: FileScore[]; audit: AuditEntry[] } {
   const audit: AuditEntry[] = [];
   const known: ReadonlySet<string> = new Set(contexts.map((c) => c.file.path));
@@ -161,7 +163,7 @@ export function reconcileScores(
     }
   }
 
-  const scores = contexts.map((context) => scoreFile(context, counted.get(context.file.path) ?? [], notRead, floors, audit));
+  const scores = contexts.map((context) => scoreFile(context, counted.get(context.file.path) ?? [], notRead, floors, by, audit));
   return { scores, audit };
 }
 
@@ -186,54 +188,113 @@ function withoutEmptyParts(item: RawBlock): RawBlock {
   return rest;
 }
 
+// A block whose score an earlier run, or another pull request, left it.
+const keptScore = (block: Block, kept: KeptEntry, by: ScoredBy): BlockScore => ({
+  ...blockScore(block, kept.entry),
+  origin: kept.origin,
+  ...(kept.raisedFrom === null ? {} : { raisedFrom: kept.raisedFrom }),
+  ...(kept.range === null ? {} : { range: kept.range }),
+  ...(by === 'scorer' ? { by } : {}),
+});
+
+// A score given in this run below the floor is raised to it; the given one is kept beside it.
+function atFloor(score: BlockScore, floor: number): BlockScore {
+  if (score.entry === null || score.entry.score >= floor) return score;
+  return { ...score, entry: { ...score.entry, score: floor }, raisedFrom: score.entry.score };
+}
+
 function scoreFile(
   context: FileContext,
   entries: RawFile[],
   notRead: ReadonlySet<string>,
   floors: TeamFloors,
+  by: ScoredBy,
   audit: AuditEntry[],
 ): FileScore {
-  const { file, plan } = context;
+  const { file, plan, kept } = context;
   const path = file.path;
   const answered = entries.length > 0;
-  // An unusable whole-file score may have been the model's warning about the file: the file is not scored.
-  const { entry: wholeFile, invalid: wholeFileInvalid } = wholeFileOf(entries, path, audit);
+  // A file with nothing left to score: nothing the model sent about its scores is used.
+  const settled = kept?.settled === true;
+  const lost = kept?.floor ?? 0; // the highest score of a block this file had and lost
+  const fileBlocks = kept?.blocks ?? context.blocks;
+  // Every block has a kept entry or is stood for: the file can be scored with no answer, settled or not.
+  const keepsAll = kept !== undefined && fileBlocks.every((b) => kept.entries.has(b.id) || kept.stoodFor.has(b.id));
 
-  const scored: Scored[] = [];
+  // An unusable whole-file score may have been the model's warning about the file: the file is not scored.
+  let given: ScoreEntry | null = null;
+  let wholeFileInvalid = false;
+  if (settled) {
+    // Named once, however many entries gave one.
+    if (entries.some((entry) => entry.score !== undefined)) audit.push({ stage: 'reconcile', action: 'whole_file_settled', subject: path, reason: 'ignored' });
+  } else {
+    ({ entry: given, invalid: wholeFileInvalid } = wholeFileOf(entries, path, audit));
+  }
+  // The file's whole-file score never falls below the one it keeps; the kept one wins a tie.
+  let wholeFile = given;
+  const keptWhole = kept?.wholeFile ?? null;
+  if (keptWhole !== null && (wholeFile === null || keptWhole.score >= wholeFile.score)) {
+    if (wholeFile !== null && keptWhole.score > wholeFile.score) {
+      audit.push({ stage: 'reconcile', action: 'whole_file_kept', subject: path, reason: 'kept' });
+    }
+    wholeFile = keptWhole;
+  }
+
   // An item for a block the file does not have may have been the model's score for lines it does: the file is not scored.
   let strayItem = false;
+  const items = new Map<string, RawBlock[]>();
+  for (const item of entries.flatMap((e) => e.blocks).map(withoutEmptyParts)) {
+    const subject = `${path} ${item.id}`;
+    if (kept !== undefined && (kept.entries.has(item.id) || kept.stoodFor.has(item.id) || kept.scoredHunks.has(item.id))) {
+      audit.push({ stage: 'reconcile', action: 'block_already_scored', subject, reason: 'ignored' });
+    } else if (!fileBlocks.some((b) => b.id === item.id)) {
+      if (!settled) strayItem = true;
+      audit.push({ stage: 'reconcile', action: 'block_not_in_file', subject, reason: settled ? 'ignored' : 'dropped' });
+    } else if (items.has(item.id)) {
+      audit.push({ stage: 'reconcile', action: 'block_duplicate', subject, reason: 'pooled' });
+      items.get(item.id)!.push(item);
+    } else {
+      items.set(item.id, [item]);
+    }
+  }
+
+  // Each block, and whether a whole-file score kept from an earlier run stands for it.
+  const scored: Array<Scored & { stoodFor: boolean }> = [];
+  for (const block of fileBlocks) {
+    const one = kept?.entries.get(block.id);
+    if (one !== undefined) {
+      scored.push({ score: keptScore(block, one, by), voided: false, stoodFor: false });
+    } else if (kept?.stoodFor.has(block.id) === true) {
+      scored.push({ score: blockScore(block, null), voided: false, stoodFor: true });
+    } else {
+      for (const s of blocksFor(path, block, items.get(block.id) ?? [], audit)) {
+        let score = atFloor(s.score, lost);
+        if (score.entry === null && given !== null && !s.voided && given.score < lost) {
+          // A whole-file score in place of a block score cannot go under the floor either.
+          score = { ...score, entry: { ...given, score: lost }, raisedFrom: given.score };
+        } else if (score.entry !== null && by === 'scorer') {
+          score = { ...score, by };
+        }
+        scored.push({ score, voided: s.voided, stoodFor: false });
+      }
+    }
+  }
+  // A block without a score of its own that no whole-file score stands for.
+  const unstood = (s: Scored & { stoodFor: boolean }): boolean => s.score.entry === null && !s.stoodFor && (given === null || s.voided);
   if (answered) {
-    const items = new Map<string, RawBlock[]>();
-    for (const item of entries.flatMap((e) => e.blocks).map(withoutEmptyParts)) {
-      if (!context.blocks.some((b) => b.id === item.id)) {
-        strayItem = true;
-        audit.push({ stage: 'reconcile', action: 'block_not_in_file', subject: `${path} ${item.id}`, reason: 'dropped' });
-      } else if (items.has(item.id)) {
-        audit.push({ stage: 'reconcile', action: 'block_duplicate', subject: `${path} ${item.id}`, reason: 'pooled' });
-        items.get(item.id)!.push(item);
-      } else {
-        items.set(item.id, [item]);
-      }
+    for (const s of scored) {
+      if (unstood(s)) audit.push({ stage: 'reconcile', action: 'block_not_scored', subject: `${path} ${s.score.id}`, reason: 'counts_as_100' });
     }
-    for (const block of context.blocks) scored.push(...blocksFor(path, block, items.get(block.id) ?? [], audit));
-    for (const { score: block, voided } of scored) {
-      if (block.entry === null && (wholeFile === null || voided)) {
-        audit.push({ stage: 'reconcile', action: 'block_not_scored', subject: `${path} ${block.id}`, reason: 'counts_as_100' });
-      }
-    }
-  } else {
-    scored.push(...context.blocks.map((b) => ({ score: blockScore(b, null), voided: false })));
   }
   const blocks = scored.map((s) => s.score);
-  // A block without a score of its own that the whole-file score cannot stand for.
-  const unscored = scored.some((s) => s.score.entry === null && (wholeFile === null || s.voided));
+  const unscored = scored.some(unstood);
 
   const notScored =
     plan.kind === 'none' ||
     wholeFileInvalid ||
     strayItem ||
     notRead.has(path) ||
-    (plan.kind !== 'rule' && !answered) ||
+    (plan.kind !== 'rule' && !answered && !keepsAll) ||
     (plan.kind === 'model_whole' && wholeFile === null) ||
     (plan.kind === 'model' && unscored);
 
@@ -255,7 +316,7 @@ function scoreFile(
   else if (wholeFileInvalid || strayItem) covered = false;
   else if (plan.kind === 'rule') covered = true;
   else if (plan.kind === 'none') covered = false;
-  else covered = answered && !notRead.has(path) && (plan.kind === 'model_whole' ? wholeFile !== null : !unscored);
+  else covered = (answered || kept !== undefined) && !notRead.has(path) && (plan.kind === 'model_whole' ? wholeFile !== null : !unscored);
 
   return {
     path,

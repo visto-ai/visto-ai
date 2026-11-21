@@ -22,6 +22,8 @@ export interface Block {
   span: Span;
 }
 
+export type ScoredBy = 'model' | 'scorer';
+
 export interface ScoreEntry { score: number; category: Category; reason: string } // reason is '' when none was given
 
 export interface BlockScore {
@@ -30,6 +32,11 @@ export interface BlockScore {
   span: Span;
   lines: Ranges;      // the block's lines on each side; a context line is on both, with its old and its new number
   entry: ScoreEntry | null; // null: the model gave this block no score of its own
+  // Each absent on a result stored before these existed.
+  origin?: 'earlier_run' | 'other_pull_request';   // the score was not given in this run
+  raisedFrom?: number;                              // the score that was given, before the floor raised it
+  range?: [number, number];                         // a part: the places of its first and last changed line among its hunk's changed lines
+  by?: ScoredBy;                                    // who gave the score; absent reads as 'model'
 }
 
 export type FileLevelSource =
@@ -49,3 +56,23 @@ export interface FileScore {
 }
 
 export interface Verdict { threshold: number; needsHuman: boolean; highest: number }
+
+/** The highest score a block or a part with this hash had of its own at the end of an earlier run. */
+export interface StoredEntry { hash: string; entry: ScoreEntry; raisedFrom: number | null }
+/** A hunk an earlier run split into parts that covered all its changed lines. */
+export interface StoredSplit { hunkHash: string; parts: Array<{ hash: string; range: [number, number] }> }
+export interface FileHistory {
+  path: string;
+  blocks: StoredEntry[];            // one for each hash
+  splits: StoredSplit[];            // one for each hunk hash: the newest run's parts
+  stoodFor: string[];               // hashes of blocks a covered run left with no entry of their own, under the file's whole-file score
+  wholeFile: ScoreEntry | null;     // the highest whole-file score an earlier run left the path with
+  coveredAt: string[];              // the diff hashes at which a published run read the file
+  readAt: { head: string; hashes: string[] } | null;   // the newest published run that read the file: its head, and every block, part and hunk hash the file had in it
+}
+export interface ScoreHistory {
+  by: ScoredBy;                     // whose block scores these are
+  lastReview: { head: string; overview: string } | null;   // the newest published run that is not a re-check
+  shown: string | null;             // what the newest published run of any mode told a person: `shownOf` its result
+  files: FileHistory[];
+}

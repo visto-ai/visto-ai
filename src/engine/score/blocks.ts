@@ -119,3 +119,26 @@ export function splitBlock(
   const rest = left.length === 0 ? null : build(`${block.id}.rest`, block.hunk, block.hunkHash, left, block.span.first);
   return { parts: kept, rest };
 }
+
+const placeOf = (hunk: Block, a: Anchor | undefined): number =>
+  a === undefined ? -1 : hunk.changed.findIndex((c) => c.side === a.side && c.line === a.line);
+
+/** The places of a part's first and last changed line among its hunk's changed lines. */
+export function rangeOf(hunk: Block, part: Block): [number, number] {
+  return [placeOf(hunk, part.changed[0]), placeOf(hunk, part.changed[part.changed.length - 1])];
+}
+
+/** The parts of a hunk at these ranges, as splitBlock cuts them; null when a range is outside the hunk or the parts leave a remainder. */
+export function partsAt(hunk: Block, ranges: Array<[number, number]>): Block[] | null {
+  let next = 0; // the first place no range has taken yet
+  for (const range of ranges) {
+    if (!Array.isArray(range) || range.length !== 2) return null;
+    const [first, last] = range;
+    if (!Number.isInteger(first) || !Number.isInteger(last) || first !== next || last < first || last >= hunk.changed.length) return null;
+    next = last + 1;
+  }
+  if (ranges.length === 0 || next !== hunk.changed.length) return null;
+  const cut = splitBlock(hunk, ranges.map(([first, last]) => ({ first: hunk.changed[first]!, last: hunk.changed[last]! })));
+  if (cut.rest !== null || cut.parts.some((p) => p === null)) return null;
+  return cut.parts as Block[];
+}

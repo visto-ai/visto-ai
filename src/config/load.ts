@@ -25,7 +25,11 @@ export interface DeploymentConfig {
   repositories: { defaults: RepoSettings; overrides: Record<string, Partial<RepoSettings>> };
 }
 
-export interface RepoSettings extends RepoConfig { ignoredAuthors: string[]; baseBranches: string[] }
+export interface RepoSettings extends RepoConfig {
+  ignoredAuthors: string[]; baseBranches: string[];
+  /** How a head after a review is reviewed; null when the file does not say, which reads as incremental. */
+  newHead: 'full' | 'incremental' | null;
+}
 
 export type ServiceConfig = DeploymentConfig & {
   app: { id: string; privateKey: string; webhookSecret: string }; database: { url: string };
@@ -163,7 +167,7 @@ export function parseConfig(yamlText: string, env: Record<string, string | undef
     repositories: {
       defaults: {
         primaryBranches: defaults.primaryBranches, scoreThreshold: defaults.score.threshold,
-        ignoredAuthors: defaults.ignoredAuthors, baseBranches: defaults.baseBranches,
+        ignoredAuthors: defaults.ignoredAuthors, baseBranches: defaults.baseBranches, newHead: defaults.newHead ?? null,
       },
       overrides: Object.fromEntries(
         Object.entries(overrides).map(([name, o]) => [
@@ -173,6 +177,7 @@ export function parseConfig(yamlText: string, env: Record<string, string | undef
             ...(o.score?.threshold === undefined ? {} : { scoreThreshold: o.score.threshold }),
             ...(o.ignoredAuthors === undefined ? {} : { ignoredAuthors: o.ignoredAuthors }),
             ...(o.baseBranches === undefined ? {} : { baseBranches: o.baseBranches }),
+            ...(o.newHead === undefined ? {} : { newHead: o.newHead }),
           },
         ]),
       ),

@@ -1,6 +1,6 @@
 import type { AuditEntry, EarlierState, EarlierThread } from '../types.ts';
 import type { FileContext } from './build.ts';
-import { inlineText, stripControl, wrapData } from './untrusted.ts';
+import { cutText, inlineText, wrapData } from './untrusted.ts';
 
 export const THREAD_TEXT_CHARS = 2000;
 export const THREAD_REPLIES_SHOWN = 30;
@@ -50,16 +50,6 @@ export function attachThreads(
   return { contexts: [...withThreads.filter(hasDue), ...withThreads.filter((c) => !hasDue(c))], shown, audit };
 }
 
-// A cut that does not split a surrogate pair.
-function cutText(text: string): string {
-  const clean = stripControl(text).text;
-  if (clean.length <= THREAD_TEXT_CHARS) return clean;
-  let end = THREAD_TEXT_CHARS;
-  const last = clean.charCodeAt(end - 1);
-  if (last >= 0xd800 && last <= 0xdbff) end -= 1;
-  return `${clean.slice(0, end)} [cut]`;
-}
-
 const WRITERS = { person: 'a person', bot: 'another bot', app: 'this reviewer' } as const;
 
 /** One thread as the model reads it: from its `### Thread` line to its last reply. */
@@ -76,13 +66,13 @@ export function threadText(shown: ShownThread, token: string): string {
     `state: ${thread.resolved ? 'resolved' : 'open'}`,
   ];
   if (thread.lastVerdict !== null) lines.push(`last verdict: ${thread.lastVerdict}`);
-  lines.push(wrapData(`thread ${key} finding`, cutText(thread.body), token));
+  lines.push(wrapData(`thread ${key} finding`, cutText(thread.body, THREAD_TEXT_CHARS), token));
   if (shown.due) {
     const skipped = Math.max(0, thread.replies.length - THREAD_REPLIES_SHOWN);
     if (skipped > 0) lines.push(`(${skipped} earlier replies are not shown)`);
     thread.replies.slice(skipped).forEach((r, i) => {
       const n = skipped + i + 1;
-      lines.push(`reply ${n}, by ${inlineText(r.author)} (${WRITERS[r.kind]}):`, wrapData(`thread ${key} reply ${n}`, cutText(r.body), token));
+      lines.push(`reply ${n}, by ${inlineText(r.author)} (${WRITERS[r.kind]}):`, wrapData(`thread ${key} reply ${n}`, cutText(r.body, THREAD_TEXT_CHARS), token));
     });
   }
   return lines.join('\n');

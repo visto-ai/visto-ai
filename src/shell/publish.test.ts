@@ -23,7 +23,7 @@ const okResult = (): ReviewResult => ({
 const lineUrl = (): string => 'https://forge.example.test/line';
 const rendered = renderReview(okResult(), { trigger: 'automatic', requestedBy: null, lineUrl, inline: true });
 const run: StoredRun = {
-  id: 4, ref: REF, job: 1, trigger: 'automatic', mode: 'full', dryRun: false, headSha: 'h1', baseSha: 'merge000',
+  id: 4, ref: REF, job: 1, trigger: 'automatic', mode: 'full', dryRun: false, headSha: 'h1', baseSha: 'merge000', baseBranch: null,
   outcome: 'ok', failureStage: null, failureCode: null, needsHuman: false, highestScore: 35,
   body: rendered.body, comments: rendered.comments, result: okResult(), usage: USAGE, startedAt: at(0), finishedAt: at(1),
   published: false, reviewId: null, publishedAt: null, inlineDropped: false,

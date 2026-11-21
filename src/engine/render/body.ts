@@ -211,7 +211,12 @@ function blockLine(file: FileScore, block: BlockScore, entry: ScoreEntry, lineUr
   const range = span.first === span.last ? `line ${span.first}` : `lines ${span.first}-${span.last}`;
   const label = `${span.side === 'LEFT' ? 'old ' : ''}${range}`;
   const shown = lineUrl === null ? label : `[${label}](${lineUrl(file, span)})`;
-  return `- ${shown}, ${entry.score}% ${scoreTail(entry)}`;
+  // A reason written on another pull request is not shown here: only its category.
+  const base = `- ${shown}, ${entry.score}% ${block.origin === 'other_pull_request' ? codeSpan(entry.category) : scoreTail(entry)}`;
+  if (Number.isInteger(block.raisedFrom) && block.raisedFrom! >= 0 && block.raisedFrom! <= 100) return `${base} _(${block.raisedFrom}% was given; a block this file lost had scored ${entry.score}%)_`;
+  if (block.origin === 'earlier_run') return `${base} _(kept from an earlier review)_`;
+  if (block.origin === 'other_pull_request') return `${base} _(scored on another pull request)_`;
+  return base;
 }
 
 // The lines a person should read, grouped by file; a file's heading is not an entry.
@@ -246,6 +251,37 @@ function humanReviewSection(result: ReviewResult, lineUrl: Meta['lineUrl']): str
   return out.join('\n\n');
 }
 
+const UNCHANGED_HEADING = '## On code unchanged since the last review';
+const UNCHANGED_NOTE = 'These are on lines that have not changed since the reviewer last read their file. They are not posted as comments and do not hold a merge.';
+const SEVERITIES: readonly unknown[] = ['blocker', 'major', 'minor'];
+// A stored list may be damaged: only an item with every field this code reads, of the right kind, is kept; a requested line that is not a line reads as none.
+const unchangedOf = (result: ReviewResult): Finding[] => {
+  if (!Array.isArray(result.unchanged)) return [];
+  return (result.unchanged as unknown[]).filter((x): x is Finding => {
+    if (typeof x !== 'object' || x === null) return false;
+    const f = x as Record<string, unknown>;
+    return typeof f.path === 'string' && typeof f.body === 'string' && SEVERITIES.includes(f.severity) && Number.isInteger(f.line);
+  }).map((f) => ({ ...f, requestedLine: Number.isInteger(f.requestedLine) ? f.requestedLine : null }));
+};
+
+// A stored result may hold a mode or a since that this code does not know: the first reads as full, the second as absent.
+function firstLineOf(result: ReviewResult, meta: Meta): string | null {
+  const since = typeof result.since === 'string' && /^[0-9a-f]{7,64}$/.test(result.since) ? result.since.slice(0, 12) : null;
+  const who = meta.requestedBy === null ? '' : ` by @${meta.requestedBy}`;
+  if (result.mode === 'incremental') {
+    const changes = since === null ? '' : `, of the changes since \`${since}\``;
+    if (meta.trigger === 'manual') return `**Incremental review** requested${who}${changes}.`;
+    return since === null ? '**Incremental review**.' : `**Incremental review** of the changes since \`${since}\`.`;
+  }
+  if (result.mode === 'recheck') {
+    const judged = Array.isArray(result.threadVerdicts) && result.threadVerdicts.length > 0;
+    const middle = (result.threadsDue ?? 0) === 0 ? 'No earlier thread was waiting for a verdict'
+      : judged ? 'The earlier threads were judged again' : 'No earlier thread could be judged';
+    return `**Re-check** requested${who}. ${middle}; code that was reviewed before was not reviewed again.`;
+  }
+  return meta.trigger === 'manual' ? `**Full review** requested${who}.` : null;
+}
+
 function overallLine(result: ReviewResult): string {
   const discussed = result.alreadyDiscussed?.length ?? 0;
   const kept = result.threadVerdicts ?? [];
@@ -254,12 +290,14 @@ function overallLine(result: ReviewResult): string {
   const count = (s: Finding['severity']) => placed.filter((f) => f.severity === s).length;
   const u = result.unplaced.length;
   const k = result.coverage.notReviewed.length;
+  const unchanged = unchangedOf(result).length;
   const parts: string[] = [];
-  if (placed.length === 0 && u === 0) parts.push(discussed > 0 ? 'No new findings.' : 'No findings.');
+  if (placed.length === 0 && u === 0) parts.push(discussed > 0 || unchanged > 0 ? 'No new findings.' : 'No findings.');
   else {
     parts.push(`${count('blocker')} blocker, ${count('major')} major, ${count('minor')} minor.`);
     if (u > 0) parts.push(`${u} could not be placed on the diff.`);
   }
+  if (unchanged > 0) parts.push(`${unchanged} major on code unchanged since the last review.`);
   if (k > 0) parts.push(`${k} files were not reviewed.`);
   if (due > 0) {
     const cleared = kept.filter((v) => v.verdict !== 'open').length;
@@ -285,9 +323,8 @@ export function renderReview(result: ReviewResult, meta: Meta): { body: string; 
 
 function rendered(result: ReviewResult, meta: Meta): { body: string; comments: InlineComment[] } {
   const prefix: string[] = [];
-  if (meta.trigger === 'manual') {
-    prefix.push(meta.requestedBy === null ? '**Full review** requested.' : `**Full review** requested by @${meta.requestedBy}.`);
-  }
+  const opening = firstLineOf(result, meta);
+  if (opening !== null) prefix.push(opening);
   if (result.status === 'failed') {
     const failure = result.failure === null ? 'unknown' : `${result.failure.stage}: ${result.failure.code}`;
     return { body: [...prefix, `${OVERALL_HEADING}\n\nThe review could not be completed (${failure}).\n\nHuman review: needed, because the review did not finish.`].join('\n\n'), comments: [] };
@@ -301,6 +338,11 @@ function rendered(result: ReviewResult, meta: Meta): { body: string; comments: I
   if (result.findings.length > 0) {
     const items = meta.inline ? bullets(result.findings.map(located)) : bullets(result.findings.map(locatedWhole), false);
     head.push(['## Findings', '', ...items].join('\n'));
+  }
+  // Always in the head, uncapped: a long section is cut there and never takes room from the tail.
+  const unchanged = unchangedOf(result);
+  if (unchanged.length > 0) {
+    head.push([UNCHANGED_HEADING, '', UNCHANGED_NOTE, '', ...bullets(unchanged.map(locatedWhole), false)].join('\n'));
   }
   const rest = result.unplaced.length > 0 ? tail : head;
   if (result.unplaced.length > 0) {

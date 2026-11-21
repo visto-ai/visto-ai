@@ -10,7 +10,7 @@ These notes record what happened while `2026-11-20-the-second-review-and-its-thr
 - Then a review of the whole branch by the strongest model: no critical defect, three important ones and nine minor ones. One fix wave of ten items followed (decisions 15 to 20), and one re-review of that wave by the same model. It found every item addressed and nothing critical or important, and left eight minor points. No second wave followed: each point was ruled on (decision 21) and is under "Put off".
 - At the end: 1,355 tests pass, the type check and the lint are clean, source and tests are ASCII.
 - The real run under Docker was made in two halves: the previous release before the fix wave, this branch after it, on the code of the wave. What it showed is below.
-- Nothing has been checked against a real GitHub App or a real model call. No review, reply or resolve has been sent anywhere by this code. See "Not verified".
+- When the branch was built, nothing had been checked against a real GitHub App or a real model call. After the merge it was: see "Verified with a real app" at the end, which also says what is still not verified.
 
 ## Decisions taken while building
 
@@ -40,14 +40,14 @@ Each entry says what was decided, why, and what it costs if it is wrong.
 
 15. "The app resolved it" no longer rests on a name. The adapter can only compare the login of the account that resolved a thread with the app's, and design 8.4 says the bot is never known by a login. A thread now counts as resolved by the app only when one of its comments is the app's own and ends with a marker. The follow-up resolves only after its confirmation landed, so every rightful case passes. Cost: none known. If GitHub never names the app as the one who resolved, this is never true either way.
 16. A verdict is not written into a thread that changed after it was judged. Each kept verdict records how many replies the thread had then; when someone other than the app wrote after that, nothing is written and the thread is judged again at the next review. The reviewer showed by a run that a person's "this is a bug", written while the model was being asked, was answered with `Answered.` and the thread resolved for good. Cost: such a thread waits for the next review although the record says it cleared. Comments are counted by position, so a comment deleted in between can hide a later one.
-17. **The rule "it quotes the same code as that thread" (5.6, step 6) was narrowed, and this is the owner's to confirm.** It now decides only for a thread whose line is no longer in the diff. A thread that still has a line is matched by position alone: within 3 lines, on the same side, of the same class. The reviewer showed by a run that a new blocker 360 lines from a thread was dropped as already discussed, and linked to the wrong thread, because both quoted a line that held only a closing brace. Cost: a finding that repeats an earlier thread on code GitHub still tracks, but sits more than 3 lines from where that thread now is, or is of the other class, is posted again.
+17. **The rule "it quotes the same code as that thread" (5.6, step 6) was narrowed. The owner kept it as built on 2026-11-20, and the design now states it.** It now decides only for a thread whose line is no longer in the diff. A thread that still has a line is matched by position alone: within 3 lines, on the same side, of the same class. The reviewer showed by a run that a new blocker 360 lines from a thread was dropped as already discussed, and linked to the wrong thread, because both quoted a line that held only a closing brace. Cost: a finding that repeats an earlier thread on code GitHub still tracks, but sits more than 3 lines from where that thread now is, or is of the other class, is posted again.
 18. Smaller points of the same review, each fixed: a stored verdict that is none of the three writes nothing (it was written as `Answered.`); a reason made only of characters nobody can see is no reason; when a file's threads have to be shed, its full file and its paired test come back if they then fit; the "Open again." sentence no longer says "fixed" about a thread that was answered; a thread that is listed twice is handed on once.
 19. Three tests that cross the tasks were added, among them one that runs the real engine under the real job on a database, with a stored first review, a thread with a person's reply, and a model stub: the review is posted with its `Already discussed` section and the verdict is written into the thread.
 20. The README was corrected in seven places: which findings are listed as already discussed; that only the newest published review decides whether a head is reviewed again; which threads are not shown; what thread text costs; the paging cap on the app's own reviews; that nothing is written into a thread someone wrote in since; and what "settled" means after decision 15.
 
 **After the re-review of the wave**
 
-21. Nothing more was changed. The eight minor points the re-review left were ruled on one by one and are listed under "Put off". One of them is a hole in decision 17 itself and is the owner's to rule on with it: for a thread whose line is no longer in the diff, the quote still decides alone, so a far-away blocker that quotes a short common line can still be dropped there. The design document is not edited: section 5.6, step 6 still states the rule as it was, and decisions 15, 16 and 17 are departures from it until the owner rules.
+21. Nothing more was changed. The eight minor points the re-review left were ruled on one by one and are listed under "Put off". One of them is a hole in decision 17 itself: for a thread whose line is no longer in the diff, the quote still decides alone, so a far-away blocker that quotes a short common line can still be dropped there. It was put to the owner with decision 17: the rule stays as built, with no minimum length for the quote, and the hole is a known limit. Section 5.6, step 6 of the design was then rewritten to the rule as built. Decisions 15 and 16 are still departures from the design's wording (8.4 and 9) and are recorded here only.
 
 ## What the reviews found that the plan had wrong
 
@@ -99,7 +99,6 @@ What the run could not show: any of this plan's own steps in the job. Offline, a
 
 **For the owner**
 
-- Decision 17, the narrowed quote rule, and the hole it leaves (decision 21): a thread whose line is gone is still matched by its quote alone, however short the quote. A minimum length for the quote would close it. From memory of GitHub, not verified, a gone line is the usual state of a thread once the code under it changed.
 - A thread that a person resolved with a click and no reply, and that is then judged open, has its confirmation rewritten to "Open again." and stays resolved, so the finding sits in a collapsed thread. Nothing asks the app to unresolve.
 - Links, images and references in the model's reason stay live in a thread reply, as everywhere else in a review. What is new is who can steer that text: anyone who may comment in the thread.
 - The README's "Why" still says the bot approves a pull request; automatic approval is not built, as its Status table says.
@@ -107,6 +106,7 @@ What the run could not show: any of this plan's own steps in the job. Offline, a
 **Known limits, left as they are**
 
 - The follow-up of the threads can be lost (a stop between the publication and the replies; the second read of the threads failing). Those threads wait for the next review of a new head or base, which may not come.
+- A thread whose line is no longer in the diff is matched by its quote alone, however short the quote (decisions 17 and 21; kept by the owner). From memory of GitHub, not verified, a gone line is the usual state of a thread once the code under it changed.
 - A verdict is still written into a thread in which a comment was edited or deleted after it was judged: the check of decision 16 sees only a comment that was added.
 - A thread that the follow-up leaves untouched because it changed is still counted as cleared in the `Overall` of the review that was just posted.
 - A head that returns after another was reviewed (a force-push back; a base changed and changed back) is reviewed, paid and posted again: only the newest published review is compared.
@@ -138,3 +138,33 @@ Nothing here has met a real GitHub App, and no model was called by the service. 
 - How GitHub renders a reply: reasoned from CommonMark's rules, not seen.
 - The real run reached neither GitHub nor a model, so it shows none of this plan's own steps.
 - CI on Linux has not run for this branch.
+
+## Verified with a real app
+
+On 2026-11-20, after the merge, the merged code was tried against a real GitHub App on a private scratch repository, with a real model. The service ran on the builder's machine from an image of `main`. The app had no webhook, so each event was posted to the service by hand: signed with the trial's own secret and built from the objects GitHub's API gives for the pull request. One small pull request with deliberate defects was reviewed four times; each review cost well under a cent.
+
+**Seen to work**
+
+- The app's token, the app's own record and an installation token. The check at start named exactly what was missing: at first `contents` write, for resolving; later every event subscription (see below).
+- **The thread query is accepted as written.** The ids read from `fullDatabaseId` are the ones the REST comment list gives, and they are beyond the 32-bit range, so decision 2 was needed. Path, side, line and review ids are right. A thread whose line a push changed comes back with no line.
+- GraphQL writes the app's account without `[bot]` and with the type `Bot`; REST writes it with `[bot]`. The account that resolved a thread is named too: typed as a user, with the login that ends in `[bot]`, so the adapter's comparison holds.
+- The first review: posted as a comment review pinned to the head commit, with its inline comments; the comments read back and stored; the review listed as the app's own afterwards.
+- `/review`: GitHub reported an organisation member as a member. On a head that had its review the command was refused with the confused reaction and the one sentence; on a new head it took the waiting push job's place, ran at once and got its eyes. `issues` write was enough for both.
+- The second review, after a reply by a person in one thread and a push that fixed another: both threads judged, one `fixed` and one `answered`; the review pinned to the new commit; `Overall` counted the threads; the replies written with the marker.
+- A reply made by the mutation is published at once and is not counted as a review of the app's. The app may edit its own reply: at the next review each earlier reply was rewritten, so a thread holds one reply of the app's, not a stack.
+- **Rendering, read from GitHub's own HTML of a reply** whose reason held a user mention, a team mention, a tag, a character reference and a forged marker: nothing was linked or rendered, the forged marker was shown as text, and the service's own marker line was not shown.
+- Resolving: refused with an error of type `FORBIDDEN` while the app had `contents` read; after the permission was changed and accepted, the next review's follow-up rewrote three replies and resolved three threads, one second apart, with no write refused.
+- Cached tokens were reported from the third review on.
+
+**Seen, and worth knowing**
+
+- **The scores moved between reviews of a file that had not changed, to either side of the threshold:** one review said a person was needed, the next that none was, the next that one was again. This is what the next plan's "a block is scored once" is for.
+- Editing the app's permissions while its webhook was switched off removed all its event subscriptions. The check at start reported each one.
+- An app with no webhook answers 404 to the list of its deliveries; the redelivery step logs that and raises its alert.
+
+**Still not verified**
+
+- GitHub's own webhook deliveries, and redelivery: no event came from GitHub.
+- `Already discussed`: the model did not raise an old finding again. The fallback when GitHub refuses the inline comments. A thread that someone writes in between its judging and the follow-up. A new permission that the installation has not accepted yet.
+- A fence line right after a list item's open fence, a zero-width space inside inline code, a link named like one of the service's tags, a write on a renamed repository (plan 5's list).
+- More than one call in a review, the scorer's contract, and anything at the size of a real pull request.

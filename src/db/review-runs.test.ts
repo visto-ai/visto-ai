@@ -9,7 +9,7 @@ const REF = { service: 'github', owner: 'acme', repo: 'shop', number: 7 } as con
 const at = (seconds: number): string => new Date(Date.parse('2026-03-01T10:00:00.000Z') + seconds * 1000).toISOString();
 
 const run = (over: Partial<RunRecord> = {}): RunRecord => ({
-  ref: REF, job: null, trigger: 'automatic', mode: 'full', dryRun: true, headSha: 'h1', baseSha: 'b1',
+  ref: REF, job: null, trigger: 'automatic', mode: 'full', dryRun: true, headSha: 'h1', baseSha: 'b1', baseBranch: null,
   outcome: 'ok', failureStage: null, failureCode: null, needsHuman: false, highestScore: 35,
   body: 'text', comments: [{ path: 'a.ts', side: 'RIGHT', line: 3, body: 'note' }], result: { findings: [] },
   usage: { calls: 2, inputTokens: 1000, outputTokens: 200, cachedTokens: 50, cost: 0.0375 },
@@ -148,5 +148,22 @@ test('adoptableRun is the newest unpublished ok run of that head with a body, wh
   await recordRun(db, run({ dryRun: false, baseSha: 'b2' }));
   const newest = await recordRun(db, run({ dryRun: false, baseSha: 'b3', startedAt: at(-90_000) }));
   assert.deepEqual([(await adoptableRun(db, REF, 'h1'))?.id, await adoptableRun(db, { ...REF, number: 8 }, 'h1')], [newest, null]);
+  await db.close();
+});
+test('a run keeps its base branch and its mode, and a row stored before has no base branch', async () => {
+  const db = await testDb();
+  const id = await recordRun(db, run({ baseBranch: 'main', mode: 'incremental' }));
+  await db.query(
+    `insert into visto_ai.review_runs
+       (service, owner, repo, number, trigger, mode, dry_run, head_sha, outcome, needs_human, highest_score, body, comments, result,
+        calls, input_tokens, output_tokens, cached_tokens, cost, started_at, finished_at)
+     values ('github', 'acme', 'shop', 7, 'automatic', 'full', true, 'h2', 'ok', false, 0, '', '[]'::jsonb, '{}'::jsonb, 0, 0, 0, 0, 0, $1::timestamptz, $1::timestamptz)`,
+    [at(5)]);
+  const stored = await listRuns(db, REF);
+  assert.equal(stored.length, 2);
+  assert.equal(stored[0]!.id, id);
+  assert.equal(stored[0]!.baseBranch, 'main');
+  assert.equal(stored[0]!.mode, 'incremental');
+  assert.equal(stored[1]!.baseBranch, null);
   await db.close();
 });

@@ -1,6 +1,6 @@
 // src/engine/types.ts
 import type { ChangedFile, PullRequestInfo, Side, Source } from '../forge/types.ts';
-import type { FileScore, Verdict } from './score/types.ts';
+import type { FileScore, ScoreEntry, ScoreHistory, Verdict } from './score/types.ts';
 
 export type Severity = 'blocker' | 'major' | 'minor';
 export interface AuditEntry { stage: string; action: string; subject: string; reason: string }
@@ -50,6 +50,8 @@ export interface ReviewInput {
   limits: Limits;
   asOf: Date;
   earlier: EarlierState | null; // what the last published review left on the pull request; null for a first review
+  history?: ScoreHistory | null;   // the scores of the pull request's earlier runs; absent reads as none
+  mode?: 'full' | 'incremental' | 'recheck';   // absent reads as 'full'
 }
 export interface ScoreRequest { text: string; blocks: string[] } // blocks: ids to score, in diff order; never empty
 export interface ScoredItem { score: number; category: string; reason: string }
@@ -68,6 +70,8 @@ export interface ReviewDeps {
   token: () => string;        // fresh random text for data markers, 16 hex characters
   log: (entry: Record<string, unknown>) => void;
   scorer?: Scorer;            // scores the blocks in place of the review model, when set
+  /** The highest scores other pull requests of the repository stored for these blocks in the last 30 days. May reject. */
+  reusableScores?: (blocks: Array<{ path: string; hash: string }>) => Promise<Array<{ path: string; hash: string; entry: ScoreEntry }>>;
 }
 
 export interface RawFinding { path: string; side: Side; line: number; severity: Severity; body: string; quote: string; beyond_diff: boolean }
@@ -80,7 +84,8 @@ export interface NotReviewed { path: string; reason: NotReviewedReason }
 export interface ReviewResult {
   status: 'ok' | 'failed';
   failure: { stage: 'context' | 'model'; code: string } | null;
-  mode: 'full';
+  mode: 'full' | 'incremental' | 'recheck';
+  since?: string;             // the head of the last review this run reads on from; absent in a full review, or with no last review
   overview: string;
   findings: Finding[];
   unplaced: UnplacedFinding[];
@@ -98,6 +103,9 @@ export interface ReviewResult {
   threadVerdicts?: ThreadVerdict[];   // the verdicts this run kept
   threadsDue?: number;                // how many threads this run owed a verdict
   alreadyDiscussed?: Discussed[];     // major and blocker findings dropped as duplicates of an earlier thread
+  nothingToDo?: boolean;              // true when an incremental review or a re-check read nothing and would tell a person what the newest published review tells
+  unchanged?: Finding[];              // in an incremental review and a re-check: majors on lines unchanged since their file was last read, listed in the body only
+  blockingOnUnchanged?: number;       // in a full review of a later head: its blocker and major findings on lines unchanged since their file was last read
 }
 export type { ChangedFile, PullRequestInfo, Side, Source };
 export type {

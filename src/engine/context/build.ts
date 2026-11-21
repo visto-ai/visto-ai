@@ -1,10 +1,12 @@
 import type { AuditEntry, ChangedFile, PullRequestInfo, Source } from '../types.ts';
 import { blocksOf } from '../score/blocks.ts';
 import { scorePlan } from '../score/rules.ts';
+import type { KeptScores } from '../score/history.ts';
 import type { ScorePlan } from '../score/rules.ts';
 import type { Block } from '../score/types.ts';
 import { commentableRanges, parsePatch, patchFromContents, renderAnchoredDiff } from './diff.ts';
 import type { Hunk, HunkLine, Ranges } from './diff.ts';
+import type { Changed } from './increment.ts';
 import { fullFileContext, numberLines } from './full-file.ts';
 import type { FullFile } from './full-file.ts';
 import { isLowPriority, orderByPriority } from './priority.ts';
@@ -27,6 +29,10 @@ export interface FileContext {
   hidden: boolean;
   // The earlier threads on this file, when a later review shows them; absent in a first review.
   threads?: ShownThread[];
+  // What the pull request's earlier runs, or other pull requests, already settle for this file; absent when nothing does.
+  kept?: KeptScores;
+  // In an incremental review and a re-check: what changed since a published review last read the file; absent otherwise.
+  changed?: Changed;
 }
 
 const isNoNewlineMarker = (line: HunkLine | undefined): boolean => line?.kind === 'meta' && line.text.startsWith('\\');
@@ -65,7 +71,7 @@ export async function buildFileContexts(
   pr: PullRequestInfo,
   files: ChangedFile[],
   source: Source,
-): Promise<{ contexts: FileContext[]; audit: AuditEntry[] }> {
+): Promise<{ contexts: FileContext[]; audit: AuditEntry[]; content: (path: string, sha: string) => Promise<string | null> }> {
   const cache = new Map<string, string | null>();
   let attempts = 0;
   const fetchContent = async (path: string, sha: string): Promise<string | null> => {
@@ -173,5 +179,5 @@ export async function buildFileContexts(
     audit.push(...stripped(removed, file.path));
     contexts.push({ file, hunks, ranges, diffText, full, test, skip, blocks: blocksOf(hunks), plan: scorePlan(file, skip), hidden });
   }
-  return { contexts, audit };
+  return { contexts, audit, content: fetchContent };
 }

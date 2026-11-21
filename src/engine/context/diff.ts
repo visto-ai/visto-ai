@@ -67,11 +67,13 @@ function anchor(prefix: 'R' | 'L', n: number): string {
   return `${prefix}${n}`.padEnd(ANCHOR_WIDTH);
 }
 
-export function renderAnchoredDiff(hunks: Hunk[]): string {
+/** The anchored diff; a hunk whose id is in `scored` already has its score, and its header says so. */
+export function renderAnchoredDiff(hunks: Hunk[], scored?: ReadonlySet<string>): string {
   const out: string[] = [];
   for (const [i, hunk] of hunks.entries()) {
     const changed = hunk.lines.filter((l) => l.kind === 'add' || l.kind === 'del').length;
-    out.push(`### Block B${i + 1} (${changed} changed ${changed === 1 ? 'line' : 'lines'}, not scored)`);
+    const state = scored?.has(`B${i + 1}`) === true ? 'scored' : 'not scored';
+    out.push(`### Block B${i + 1} (${changed} changed ${changed === 1 ? 'line' : 'lines'}, ${state})`);
     out.push(hunk.header);
     for (const line of hunk.lines) {
       if (line.kind === 'meta') out.push(line.text);

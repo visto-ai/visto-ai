@@ -14,7 +14,7 @@ const run = (over: Partial<StoredRun> & { verdicts?: unknown; result?: unknown }
     scores: [{ path: 'src/a.ts', diffHash: 'd1' }],
   };
   return {
-    id: 1, ref: REF, job: 1, trigger: 'automatic', mode: 'full', dryRun: false, headSha: 'h1', baseSha: 'b1',
+    id: 1, ref: REF, job: 1, trigger: 'automatic', mode: 'full', dryRun: false, headSha: 'h1', baseSha: 'b1', baseBranch: null,
     outcome: 'ok', failureStage: null, failureCode: null, needsHuman: false, highestScore: 1,
     body: '', comments: [{ path: 'src/a.ts', side: 'RIGHT', line: 12, body: BODY }],
     result: verdicts === undefined ? base : { ...(base as object), threadVerdicts: verdicts },

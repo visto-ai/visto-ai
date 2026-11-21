@@ -5,8 +5,9 @@ import type { Db } from './types.ts';
 export interface RunUsage { calls: number; inputTokens: number; outputTokens: number; cachedTokens: number; cost: number }
 export interface RunRecord {
   ref: PullRequestRef; job: number | null;
-  trigger: 'automatic' | 'manual'; mode: 'full'; dryRun: boolean;
-  headSha: string; baseSha: string | null;          // baseSha is null when the run failed before the pull request was read
+  trigger: 'automatic' | 'manual'; mode: 'full' | 'incremental' | 'recheck'; dryRun: boolean;
+  headSha: string; baseSha: string | null;          // baseSha and baseBranch are null when the run failed before the pull request was read
+  baseBranch: string | null;
   outcome: 'ok' | 'failed'; failureStage: string | null; failureCode: string | null;
   needsHuman: boolean; highestScore: number;
   body: string;                                     // the review text as it would be posted; '' when none was rendered
@@ -28,15 +29,15 @@ const count = (n: number): number => Math.round(amount(n));
 export async function recordRun(db: Db, run: RunRecord): Promise<number> {
   const rows = await db.query<{ id: number }>(
     `insert into visto_ai.review_runs
-       (service, owner, repo, number, job, trigger, mode, dry_run, head_sha, base_sha, outcome,
+       (service, owner, repo, number, job, trigger, mode, dry_run, head_sha, base_sha, base_branch, outcome,
         failure_stage, failure_code, needs_human, highest_score, body, comments, result,
         calls, input_tokens, output_tokens, cached_tokens, cost, started_at, finished_at)
-     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17::jsonb, $18::jsonb,
-             $19, $20, $21, $22, $23, $24::timestamptz, $25::timestamptz)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18::jsonb, $19::jsonb,
+             $20, $21, $22, $23, $24, $25::timestamptz, $26::timestamptz)
      returning id`,
     [
       run.ref.service, storable(run.ref.owner).toLowerCase(), storable(run.ref.repo).toLowerCase(), run.ref.number,
-      run.job, run.trigger, run.mode, run.dryRun, storable(run.headSha), storableOrNull(run.baseSha), run.outcome,
+      run.job, run.trigger, run.mode, run.dryRun, storable(run.headSha), storableOrNull(run.baseSha), storableOrNull(run.baseBranch), run.outcome,
       storableOrNull(run.failureStage), storableOrNull(run.failureCode), run.needsHuman, run.highestScore,
       storable(run.body), storableJson(run.comments), storableJson(run.result),
       count(run.usage.calls), count(run.usage.inputTokens), count(run.usage.outputTokens), count(run.usage.cachedTokens), amount(run.usage.cost),
@@ -46,8 +47,8 @@ export async function recordRun(db: Db, run: RunRecord): Promise<number> {
 }
 
 interface Row {
-  id: number; job: number | null; trigger: RunRecord['trigger']; mode: 'full'; dry_run: boolean;
-  head_sha: string; base_sha: string | null; outcome: RunRecord['outcome'];
+  id: number; job: number | null; trigger: RunRecord['trigger']; mode: RunRecord['mode']; dry_run: boolean;
+  head_sha: string; base_sha: string | null; base_branch: string | null; outcome: RunRecord['outcome'];
   failure_stage: string | null; failure_code: string | null; needs_human: boolean; highest_score: number;
   body: string; comments: unknown; result: unknown;
   calls: number; input_tokens: number; output_tokens: number; cached_tokens: number; cost: number;
@@ -55,7 +56,7 @@ interface Row {
   published: boolean; review_id: string | null; published_at: Date | null; inline_dropped: boolean;
 }
 
-const COLUMNS = `id, job, trigger, mode, dry_run, head_sha, base_sha, outcome, failure_stage, failure_code,
+const COLUMNS = `id, job, trigger, mode, dry_run, head_sha, base_sha, base_branch, outcome, failure_stage, failure_code,
             needs_human, highest_score, body, comments, result,
             calls, input_tokens, output_tokens, cached_tokens, cost::float8 as cost, started_at, finished_at,
             published, review_id, published_at, inline_dropped`;
@@ -63,7 +64,7 @@ const COLUMNS = `id, job, trigger, mode, dry_run, head_sha, base_sha, outcome, f
 function toRun(r: Row, ref: PullRequestRef): StoredRun {
   return {
     id: r.id, ref, job: r.job,
-    trigger: r.trigger, mode: r.mode, dryRun: r.dry_run, headSha: r.head_sha, baseSha: r.base_sha,
+    trigger: r.trigger, mode: r.mode, dryRun: r.dry_run, headSha: r.head_sha, baseSha: r.base_sha, baseBranch: r.base_branch,
     outcome: r.outcome, failureStage: r.failure_stage, failureCode: r.failure_code,
     needsHuman: r.needs_human, highestScore: r.highest_score,
     body: r.body, comments: r.comments, result: r.result,

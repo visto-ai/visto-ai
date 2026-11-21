@@ -51,6 +51,16 @@ test('each hunk opens with its block header', () => {
   assert.match(text, /\n### Block B2 \(1 changed line, not scored\)\n@@ /);
 });
 
+test('a hunk that has its score says so in its header, and the others say what they said', () => {
+  const twoHunks = patch + '\n@@ -40,2 +41,3 @@\n x\n+b\n y';
+  const hunks = parsePatch(twoHunks);
+  const text = renderAnchoredDiff(hunks, new Set(['B2']));
+  assert.match(text, /^### Block B1 \(3 changed lines, not scored\)\n@@ /);
+  assert.match(text, /\n### Block B2 \(1 changed line, scored\)\n@@ /);
+  assert.equal(text.replace('1 changed line, scored', '1 changed line, not scored'), renderAnchoredDiff(hunks));
+  assert.equal(renderAnchoredDiff(hunks, new Set()), renderAnchoredDiff(hunks));
+});
+
 test('commentable ranges', () => {
   assert.deepEqual(commentableRanges(parsePatch(patch)), { RIGHT: [[10, 13]], LEFT: [[11, 11]] });
 });

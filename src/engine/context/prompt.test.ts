@@ -1,13 +1,15 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { estimateTokens, packBatches } from './batches.ts';
+import { estimateTokens, packBatches, unitTokens } from './batches.ts';
 import type { Batch } from './batches.ts';
 import { buildFileContexts } from './build.ts';
 import type { FileContext } from './build.ts';
 import { ANCHOR_LEGEND } from './diff.ts';
 import { threadsPart } from './threads.ts';
-import { buildMessages, fixedTokens, headerStripCounts, pullRequestHeader } from './prompt.ts';
+import { LAST_OVERVIEW_CHARS, buildMessages, fixedTokens, headerStripCounts, pullRequestHeader } from './prompt.ts';
+import { MEASURE_NUMBER, MEASURE_TOKEN } from './section.ts';
 import { submitReviewTool } from '../model/submit-review.ts';
+import type { KeptScores } from '../score/history.ts';
 import type { ChangedFile, PullRequestInfo, Source } from '../types.ts';
 
 const pr: PullRequestInfo = {
@@ -87,6 +89,32 @@ test('per-file lines follow the heading, previous path only when renamed', () =>
   });
   assert.match(renamed[2]!.content, /## File 1\/3: src\/n\.ts\nstatus: renamed\nadditions: 0\ndeletions: 0\nprevious path: src\/o\.ts\nwhole-file score: allowed\n<<<data/);
   assert.doesNotMatch(msgs[2]!.content, /previous path/);
+});
+test('a file with nothing left to score is told it takes no whole-file score', () => {
+  const kept = (settled: boolean): KeptScores => ({
+    blocks: [], entries: new Map(), stoodFor: new Set(), wholeFile: null, floor: 0, settled, covered: false, scoredHunks: new Set(['B1']), readAt: null,
+  });
+  const header = (c: FileContext): string => buildMessages({ ...args, batch: { files: [c], tokens: 1 } })[2]!.content;
+  assert.match(header(ctx('src/a.ts', { kept: kept(true) })), /\ndeletions: 1\nwhole-file score: not allowed\. Every block of this file already has its score\.\n<<<data/);
+  assert.doesNotMatch(header(ctx('src/a.ts', { kept: kept(true) })), /whole-file score: allowed/);
+  assert.match(header(ctx('src/a.ts', { kept: kept(false) })), /\ndeletions: 1\nwhole-file score: allowed\n<<<data/);
+  assert.equal(header(ctx('src/a.ts', { kept: kept(false) })), header(ctx('src/a.ts')));
+  // A moved file is still asked for its score of the move.
+  const moved = ctx('lib/a.ts', { plan: { kind: 'model_whole' }, kept: kept(true) });
+  assert.match(header(moved), /whole-file score: required\./);
+});
+test('a file that is sent in an incremental review says which lines changed, and a file without the field says nothing', async (t) => {
+  const header = (c: FileContext): string => buildMessages({ ...args, batch: { files: [c], tokens: 1 } })[2]!.content;
+  const changed = ctx('src/a.ts', { changed: { all: false, right: [[4, 4]], leftBlocks: ['B2'] } });
+  await t.test('the line stands after the whole-file line', () => {
+    assert.match(header(changed), /\ndeletions: 1\nwhole-file score: allowed\nlines changed since this file was last reviewed: R4; removed lines of B2\n<<<data/);
+  });
+  await t.test('a file without the field says nothing', () => {
+    assert.doesNotMatch(header(ctx('src/a.ts')), /lines changed since/);
+  });
+  await t.test('the packer counts the line', () => {
+    assert.ok(unitTokens(changed) > unitTokens(ctx('src/a.ts')));
+  });
 });
 test('an excerpt and a paired test are labelled', () => {
   const m = buildMessages({
@@ -204,4 +232,32 @@ test('the threads of a call are written in key order, whatever the order of its 
   const order = ['T1', 'T2', 'T9', 'T10'].map((k) => c.indexOf(`### Thread ${k}\n`));
   assert.ok(order.every((n) => n > 0));
   assert.deepEqual([...order].sort((x, y) => x - y), order);
+});
+
+test('the last review overview is shown as data at the end of the header, cut and counted', () => {
+  const line = 'The last review of this pull request summarized it as below. It describes an earlier state of the code and proves nothing about the code you are given.';
+  const today = pullRequestHeader(pr, 2, 'tok');
+  const long = pullRequestHeader(pr, 2, 'tok', 'x'.repeat(5000));
+  assert.equal(long, `${today}\n${line}\n<<<data tok last review overview>>>\n${'x'.repeat(4000)} [cut]\n<<<end tok>>>`);
+  assert.equal(LAST_OVERVIEW_CHARS, 4000);
+  // Not cut when it fits.
+  assert.ok(pullRequestHeader(pr, 2, 'tok', 'y'.repeat(4000)).endsWith(`\n${'y'.repeat(4000)}\n<<<end tok>>>`));
+  // A control character is stripped.
+  assert.ok(pullRequestHeader(pr, 2, 'tok', 'Rounds\u200b totals.').endsWith(`${line}\n<<<data tok last review overview>>>\nRounds totals.\n<<<end tok>>>`));
+  // A cut does not split a surrogate pair.
+  const pair = `${'x'.repeat(3999)}\ud83d\ude00tail`;
+  assert.ok(pullRequestHeader(pr, 2, 'tok', pair).endsWith(`\n${'x'.repeat(3999)} [cut]\n<<<end tok>>>`));
+  // fixedTokens counts what was added, with threads or without.
+  const overview = 'Changes the retry delay.';
+  const added = estimateTokens(pullRequestHeader(pr, MEASURE_NUMBER, MEASURE_TOKEN, overview)) - estimateTokens(pullRequestHeader(pr, MEASURE_NUMBER, MEASURE_TOKEN));
+  assert.ok(added > 0);
+  assert.equal(fixedTokens('CONTRACT', pr, false, overview), fixedTokens('CONTRACT', pr) + added);
+  assert.equal(fixedTokens('CONTRACT', pr, true, overview), fixedTokens('CONTRACT', pr, true) + added);
+  // Without one, both are today's.
+  assert.equal(pullRequestHeader(pr, 2, 'tok', undefined), today);
+  assert.equal(fixedTokens('CONTRACT', pr, false, undefined), fixedTokens('CONTRACT', pr));
+  assert.deepEqual(buildMessages({ ...args, lastOverview: undefined }), msgs);
+  // buildMessages puts it in the header message of the call.
+  assert.equal(buildMessages({ ...args, lastOverview: overview })[1]!.content, pullRequestHeader(pr, 3, 'tok', overview));
+  assert.deepEqual(buildMessages({ ...args, lastOverview: overview })[2], msgs[2]);
 });

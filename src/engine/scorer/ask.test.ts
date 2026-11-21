@@ -7,6 +7,7 @@ import { pullRequestHeader } from '../context/prompt.ts';
 import { fileSection } from '../context/section.ts';
 import type { SubmitReviewArgs } from '../model/submit-review.ts';
 import { blocksOf } from '../score/blocks.ts';
+import type { KeptScores } from '../score/history.ts';
 import { scorePlan } from '../score/rules.ts';
 import type { ChangedFile, PullRequestInfo, ScoreAnswer, ScoreRequest, Scorer, ScoredItem, Usage } from '../types.ts';
 import { SCORER_CONCURRENCY, SCORER_NOTE, askScorer, summariesOf } from './ask.ts';
@@ -161,4 +162,26 @@ test('one log entry per file asked, with no path in it', async () => {
     { event: 'scorer_call', blocks: 1, code: 'provider', usage: usage() },
   ]);
   assert.ok(!JSON.stringify(logged).includes('src/'));
+});
+
+test('the scorer is asked only for hunks without a score, and not for a file that has none', async () => {
+  const kept = (scored: string[], settled: boolean): KeptScores => ({
+    blocks: [], entries: new Map(), stoodFor: new Set(), wholeFile: null, floor: 0, settled, covered: false, scoredHunks: new Set(scored), readAt: null,
+  });
+  const part = { ...ctx('src/a.ts', twoHunks), kept: kept(['B1'], false) };
+  const done = { ...ctx('src/b.ts', twoHunks), kept: kept(['B1', 'B2'], true) };
+  const logged: Record<string, unknown>[] = [];
+  const s = stub(() => answer({ blocks: { B1: item(99), B2: item(40) } }));
+  const out = await ask(s, [part, done], new Map([['src/b.ts', 'Changes two values.']]), logged);
+  assert.equal(s.requests.length, 1);
+  assert.deepEqual(s.requests[0]!.blocks, ['B2']);
+  assert.ok(s.requests[0]!.text.includes('## File 1/2: src/a.ts'));
+  assert.equal(logged.length, 1);
+  // An answer for a block that was not asked is not kept; the settled file keeps its summary and no block.
+  assert.deepEqual(out.answers.map((a) => a.value.files[0]), [
+    { path: 'src/a.ts', change_summary: '', blocks: [{ id: 'B2', score: 40, category: 'fix', reason: 'Changes a value.' }] },
+    { path: 'src/b.ts', change_summary: 'Changes two values.', blocks: [] },
+  ]);
+  assert.deepEqual(out.usage, usage());
+  assert.deepEqual(out.audit, []);
 });

@@ -32,7 +32,7 @@ function prEvent(over: Partial<PullRequestFacts> = {}): ForgeEvent {
   return { kind: 'pull_request', action: 'synchronize', facts: facts(over) };
 }
 const NO_JOBS = {
-  settingsFor: () => ({ primaryBranches: ['main'], scoreThreshold: 70, ignoredAuthors: [], baseBranches: [] }),
+  settingsFor: () => ({ primaryBranches: ['main'], scoreThreshold: 70, ignoredAuthors: [], baseBranches: [], newHead: null }),
   onQueued: () => {},
 };
 const headers = {};

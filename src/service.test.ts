@@ -21,7 +21,7 @@ const at = (seconds: number): string => new Date(Date.parse('2026-03-01T10:00:00
 const job = (over = {}) => ({ ref: REF, reason: 'opened', headSha: 'h1', runAt: at(0), now: at(0), delivery: 'd1', replace: true,
   trigger: 'automatic' as const, requestedBy: null, commentId: null, association: null, installation: null, ...over });
 const run = (over: Partial<RunRecord> = {}): RunRecord => ({
-  ref: REF, job: null, trigger: 'automatic', mode: 'full', dryRun: true, headSha: 'h1', baseSha: 'b1',
+  ref: REF, job: null, trigger: 'automatic', mode: 'full', dryRun: true, headSha: 'h1', baseSha: 'b1', baseBranch: null,
   outcome: 'ok', failureStage: null, failureCode: null, needsHuman: false, highestScore: 35,
   body: 'text', comments: [{ path: 'a.ts', side: 'RIGHT', line: 3, body: 'note' }], result: { findings: [] },
   usage: { calls: 2, inputTokens: 1000, outputTokens: 200, cachedTokens: 50, cost: 0.0375 },

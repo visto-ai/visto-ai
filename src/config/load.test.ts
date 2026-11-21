@@ -391,7 +391,22 @@ test('serviceConfig accepts a config in dry run and one out of it, and still nam
 });
 test('repoSettingsFor applies an override key by key, and repoConfigFor still returns the two keys the engine reads', () => {
   const c = parseConfig(`${SERVICE_YAML}repositories:\n  overrides:\n    Acme/Shop: { baseBranches: [main], ignoredAuthors: [] }\n`, ENV);
-  assert.deepEqual(repoSettingsFor(c, 'acme/shop'), { primaryBranches: ['main', 'master'], scoreThreshold: 70, ignoredAuthors: [], baseBranches: ['main'] });
+  assert.deepEqual(repoSettingsFor(c, 'acme/shop'), { primaryBranches: ['main', 'master'], scoreThreshold: 70, ignoredAuthors: [], baseBranches: ['main'], newHead: null });
   assert.deepEqual(repoSettingsFor(c, 'acme/other').ignoredAuthors, ['dependabot[bot]']);
   assert.deepEqual(repoConfigFor(c, 'acme/shop'), { primaryBranches: ['main', 'master'], scoreThreshold: 70 });
+});
+test('how a new head is reviewed can be set for all repositories or for one, and is not set otherwise', () => {
+  const unset = parseConfig(SERVICE_YAML, ENV);
+  assert.equal(repoSettingsFor(unset, 'acme/shop').newHead, null);
+  const all = parseConfig(`${SERVICE_YAML}repositories:\n  defaults: { newHead: full }\n`, ENV);
+  assert.deepEqual([repoSettingsFor(all, 'acme/shop').newHead, repoSettingsFor(all, 'acme/other').newHead], ['full', 'full']);
+  const one = parseConfig(`${SERVICE_YAML}repositories:\n  defaults: { newHead: full }\n  overrides:\n    acme/shop: { newHead: incremental }\n`, ENV);
+  assert.deepEqual([repoSettingsFor(one, 'acme/shop').newHead, repoSettingsFor(one, 'acme/other').newHead], ['incremental', 'full']);
+  const onlyOne = parseConfig(`${SERVICE_YAML}repositories:\n  overrides:\n    acme/shop: { newHead: full }\n`, ENV);
+  assert.deepEqual([repoSettingsFor(onlyOne, 'acme/shop').newHead, repoSettingsFor(onlyOne, 'acme/other').newHead], ['full', null]);
+});
+test('another word for newHead is refused', () => {
+  for (const yaml of [`${SERVICE_YAML}repositories:\n  defaults: { newHead: recheck }\n`, `${SERVICE_YAML}repositories:\n  overrides:\n    acme/shop: { newHead: partial }\n`]) {
+    assert.throws(() => parseConfig(yaml, ENV), (e: unknown) => e instanceof ConfigError && e.issues.some((i) => i.includes('newHead')));
+  }
 });

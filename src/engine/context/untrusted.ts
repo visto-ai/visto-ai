@@ -31,6 +31,16 @@ export function inlineText(text: string): string {
   return stripped.replace(/[\n\t]/g, ' ').slice(0, INLINE_LIMIT);
 }
 
+// Untrusted text shown whole up to `limit` characters: stripped, then cut without splitting a surrogate pair.
+export function cutText(text: string, limit: number): string {
+  const clean = stripControl(text).text;
+  if (clean.length <= limit) return clean;
+  let end = limit;
+  const last = clean.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+  return `${clean.slice(0, end)} [cut]`;
+}
+
 // Deletion can join the pieces around an occurrence into a new one, so repeat
 // until none is left. Each pass shortens the text, so this terminates.
 function deleteToken(text: string, token: string): string {

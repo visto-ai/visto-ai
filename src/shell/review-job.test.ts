@@ -6,6 +6,7 @@ import { enqueueJob, claimJob, finishJob, getJob, requeueJob, unfinishedJobs } f
 import type { Job } from '../db/jobs.ts';
 import { savePullRequest } from '../db/pull-requests.ts';
 import { listRuns, markPublished, recordRun } from '../db/review-runs.ts';
+import { recordBlockScores } from '../db/block-scores.ts';
 import type { RunRecord } from '../db/review-runs.ts';
 import { listComments, recordComments } from '../db/review-comments.ts';
 import type { StoredComment } from '../db/review-comments.ts';
@@ -13,6 +14,7 @@ import type { RepoSettings } from '../config/load.ts';
 import type { ForgeWriter, LivePullRequest, PostedComment, ReviewThread, Source } from '../forge/types.ts';
 import { review } from '../engine/review.ts';
 import { renderReview } from '../engine/render/body.ts';
+import { shownOf } from '../engine/score/shown.ts';
 import type { BlockScore } from '../engine/score/types.ts';
 import { SUBMIT_REVIEW } from '../engine/model/submit-review.ts';
 import type { ModelClient, ModelResponse, ReviewDeps, ReviewInput, ReviewResult, ThreadVerdict } from '../engine/types.ts';
@@ -29,7 +31,7 @@ beforeEach(async () => { db = await testDb(); });
 afterEach(async () => { await db.close(); });
 
 const LIMITS = { inputTokensPerCall: 200_000, batchesPerReview: 6, modelTimeoutSeconds: 240 };
-const SETTINGS: RepoSettings = { primaryBranches: ['main'], scoreThreshold: 70, ignoredAuthors: ['dependabot[bot]'], baseBranches: [] };
+const SETTINGS: RepoSettings = { primaryBranches: ['main'], scoreThreshold: 70, ignoredAuthors: ['dependabot[bot]'], baseBranches: [], newHead: null };
 const LIVE: LivePullRequest = {
   info: { ref: REF, title: 'Add things', description: '', author: 'octo-dev', baseBranch: 'main', headBranch: 'feat', baseSha: 'merge000', headSha: 'h1', draft: false },
   state: 'open',
@@ -138,6 +140,8 @@ async function harness(options: Options = {}) {
     job = (await claimJob(db, job.id, at(0)))!;
   }
   const inputs: ReviewInput[] = [];
+  /** The engine's dependencies each review was given, beside its input. */
+  const engines: ReviewDeps[] = [];
   const healthCalls: Array<'auth' | 'no_credit' | null> = [];
   const healthTimes: string[] = [];
   let reviewCalled = false;
@@ -240,10 +244,11 @@ async function harness(options: Options = {}) {
     dryRun: options.dryRun ?? true,
     writer,
     engineDeps: () => ({}) as ReviewDeps,
-    review: (input) => {
+    review: (input, engine) => {
       inputs.push(input);
+      engines.push(engine);
       reviewCalled = true;
-      return Promise.resolve(options.result ?? (options.renderThrows === true ? flaggedResult() : okResult()));
+      return Promise.resolve(options.result ?? (options.renderThrows === true ? flaggedResult() : okResult({ mode: input.mode ?? 'full' })));
     },
     lineUrl: () => { if (options.renderThrows === true) throw new Error('no_link'); return 'https://git.example.test/x'; },
     commentUrl: (_ref, commentId) => `https://git.example.test/c/${commentId}`,
@@ -251,7 +256,7 @@ async function harness(options: Options = {}) {
     health: { reviewed: (code, when) => { healthCalls.push(code); healthTimes.push(when.toISOString()); } },
     spend: { noteRun: (usage) => { spendCalls.push(usage); } },
   };
-  return { job, deps, inputs, healthCalls, healthTimes, spendCalls, slept, logged, writes, get reads() { return reads; } };
+  return { job, deps, inputs, engines, healthCalls, healthTimes, spendCalls, slept, logged, writes, get reads() { return reads; } };
 }
 const live = (options: Options = {}) => harness({ dryRun: false, ...options });
 /** A job a /review comment stored: by octo-lead, comment 31, through installation 99; out of dry run unless given. */
@@ -267,15 +272,19 @@ const recorded = (over: Partial<RunRecord> = {}): Promise<number> => {
   const result = (over.result as ReviewResult | undefined) ?? okResult();
   const text = renderReview(result, { trigger: 'automatic', requestedBy: null, lineUrl: () => 'https://git.example.test/x', inline: true });
   return recordRun(db, {
-    ref: REF, job: null, trigger: 'automatic', mode: 'full', dryRun: false, headSha: 'h1', baseSha: 'merge000', outcome: 'ok', failureStage: null, failureCode: null,
+    ref: REF, job: null, trigger: 'automatic', mode: 'full', dryRun: false, headSha: 'h1', baseSha: 'merge000', baseBranch: null, outcome: 'ok', failureStage: null, failureCode: null,
     needsHuman: false, highestScore: 35, body: text.body, comments: text.comments, result, usage: USAGE, startedAt: at(-3600), finishedAt: at(-3500), ...over,
   });
 };
-/** A review published as 401: its run at h0 against merge000, and its comment 8001 stored, unless told otherwise. */
-async function published(over: { head?: string; comments?: StoredComment[]; pullRequest?: number } = {}): Promise<number> {
+/** A review published as 401: its run at h0 against merge000 on the base branch main, a full review, and its comment 8001 stored, unless told otherwise. */
+async function published(over: {
+  head?: string; comments?: StoredComment[]; pullRequest?: number; baseBranch?: string | null; mode?: RunRecord['mode']; result?: unknown; reviewId?: string;
+} = {}): Promise<number> {
   const ref = over.pullRequest === undefined ? REF : { ...REF, number: over.pullRequest };
-  const id = await recorded({ ref, headSha: over.head ?? 'h0', result: EARLIER_RESULT });
-  await markPublished(db, id, { reviewId: '401', publishedAt: at(-3400), body: EARLIER.body, inlineDropped: false });
+  const id = await recorded({
+    ref, headSha: over.head ?? 'h0', result: over.result ?? EARLIER_RESULT, baseBranch: over.baseBranch === undefined ? 'main' : over.baseBranch, mode: over.mode ?? 'full',
+  });
+  await markPublished(db, id, { reviewId: over.reviewId ?? '401', publishedAt: at(-3400), body: EARLIER.body, inlineDropped: false });
   await recordComments(db, id, ref, over.comments ?? [STORED_8001]);
   return id;
 }
@@ -740,16 +749,16 @@ test('a stranger\'s command that superseded the head\'s job gives the head its j
   await runReviewJob(no.job, no.deps);
   assert.deepEqual((await unfinishedJobs(db)).filter((j) => j.ref.number === 8).map((j) => [j.trigger, j.headSha, j.status]), [['automatic', 'h1', 'pending']]);
 });
-test('a /review on a closed pull request, or on one that has its review, is refused with no eyes first', async () => {
+test('a /review on a closed pull request is refused with no eyes first, and one on a head that has its review re-checks it', async () => {
   const closed = await manualJob({ live: { ...LIVE, state: 'closed' } });
   await runReviewJob(closed.job, closed.deps);
   assert.deepEqual(closed.writes, [['react', '31', 'confused'], ['comment', '@octo-lead The review was not started (`closed`).']]);
   const first = await live({ pullRequest: 8 });
   await runReviewJob(first.job, first.deps);
-  const second = await manualJob({ pullRequest: 8 });
+  const second = await manualJob({ pullRequest: 8, own: [[{ id: '501', commit: 'h1' }]] });
   await runReviewJob(second.job, second.deps);
-  assert.deepEqual([second.writes, second.inputs.length],
-    [[['react', '31', 'confused'], ['comment', '@octo-lead The review was not started (`already_reviewed`).']], 0]);
+  assert.deepEqual(second.writes.filter((w) => w[0] === 'react'), [['react', '31', 'eyes']]);
+  assert.deepEqual([second.inputs.length, second.inputs[0]!.mode, (await getJob(db, second.job.id))?.outcome], [1, 'recheck', 'published']);
 });
 test('a /review on a head whose review only the git service knows of is refused before anything is paid; one on another commit does not stop it', async () => {
   const h = await manualJob({ own: [[{ id: '470', commit: 'h1' }]] });
@@ -889,16 +898,16 @@ test('a first review reads no thread and is told of no earlier state', async () 
   assert.equal(h.inputs[0]!.earlier, null);
   assert.equal((await getJob(db, h.job.id))?.outcome, 'published');
 });
-test('a head and base that are already reviewed are not reviewed again, by a push or by a command', async () => {
+test('a head and base that are already reviewed are not reviewed again by a push, and a command re-checks them', async () => {
   await published({ head: 'h1' });
   const push = await live();
   await runReviewJob(push.job, push.deps);
   const j = await getJob(db, push.job.id);
   assert.deepEqual([j?.status, j?.outcome, push.inputs.length], ['dropped', 'already_reviewed', 0]);
-  const command = await manualJob();
+  const command = await manualJob({ own: [[{ id: '401', commit: 'h1' }]] });
   await runReviewJob(command.job, command.deps);
-  assert.deepEqual([(await getJob(db, command.job.id))?.outcome, command.inputs.length], ['refused', 0]);
-  assert.deepEqual(command.writes.at(-1), ['comment', '@octo-lead The review was not started (`already_reviewed`).']);
+  assert.deepEqual([(await getJob(db, command.job.id))?.outcome, command.inputs.length, command.inputs[0]!.mode], ['published', 1, 'recheck']);
+  assert.equal(command.writes.some((w) => w[0] === 'comment'), false);
 });
 test('a /review on a later head is honoured', async () => {
   await published();
@@ -1027,4 +1036,291 @@ test('the review entry counts the threads that were due, the verdicts and the du
   await runReviewJob(resumed.job, resumed.deps);
   const stored = resumed.logged.find((e) => e.event === 'review')!;
   assert.deepEqual([stored.resumed, stored.threads_due, stored.verdicts, stored.duplicates], [true, 0, 0, 0]);
+});
+
+/** The rows of block_scores, oldest first. */
+const blockRows = (): Promise<Array<{ run: number; number: number; path: string; hash: string; score: number; category: string; reason: string; scored_by: string; scored_at: Date }>> =>
+  db.query('select run, number, path, hash, score, category, reason, scored_by, scored_at from visto_ai.block_scores order by id');
+/** A finished review with flaggedResult's one scored block. */
+const scoredResult = (over: Partial<ReviewResult> = {}): ReviewResult => okResult({ scores: flaggedResult().scores, verdict: flaggedResult().verdict, ...over });
+const OWN_401 = [[{ id: '401', commit: 'h0' }]];
+
+test('a push after a review is reviewed incrementally, with the history of the earlier runs', async () => {
+  await published({ head: 'h0' });
+  const h = await live({ own: OWN_401 });
+  await runReviewJob(h.job, h.deps);
+  assert.deepEqual([h.inputs[0]!.mode, h.inputs[0]!.history?.lastReview?.head, h.inputs[0]!.history?.by], ['incremental', 'h0', 'model']);
+  assert.deepEqual([(await listRuns(db, REF)).at(-1)!.mode, (await listRuns(db, REF)).at(-1)!.baseBranch], ['incremental', 'main']);
+});
+test('a repository set to full is reviewed in full at every head, with its history', async () => {
+  await published({ head: 'h0' });
+  const h = await live({ own: OWN_401, settings: { ...SETTINGS, newHead: 'full' } });
+  await runReviewJob(h.job, h.deps);
+  assert.deepEqual([h.inputs[0]!.mode, h.inputs[0]!.history?.lastReview?.head], ['full', 'h0']);
+  assert.equal((await listRuns(db, REF)).at(-1)!.mode, 'full');
+});
+test('a first review is a full review with an empty history', async () => {
+  const h = await live();
+  await runReviewJob(h.job, h.deps);
+  assert.equal(h.inputs[0]!.mode, 'full');
+  assert.deepEqual([h.inputs[0]!.history?.files, h.inputs[0]!.history?.lastReview, h.inputs[0]!.history?.shown], [[], null, null]);
+  assert.equal((await listRuns(db, REF))[0]!.mode, 'full');
+});
+test('a pull request moved to another base branch is reviewed in full', async () => {
+  await published({ baseBranch: 'main' });
+  const h = await live({ own: OWN_401, live: { ...LIVE, info: { ...LIVE.info, baseBranch: 'release' } } });
+  await runReviewJob(h.job, h.deps);
+  assert.equal(h.inputs[0]!.mode, 'full');
+  assert.deepEqual([(await listRuns(db, REF)).at(-1)!.mode, (await listRuns(db, REF)).at(-1)!.baseBranch], ['full', 'release']);
+});
+test('a review stored before base branches were kept is followed by one full review', async () => {
+  await published({ baseBranch: null });
+  const h = await live({ own: OWN_401 });
+  await runReviewJob(h.job, h.deps);
+  assert.equal(h.inputs[0]!.mode, 'full');
+  const next = await live({ head: 'h2', own: [[{ id: '501', commit: 'h1' }, { id: '401', commit: 'h0' }]] });
+  await runReviewJob(next.job, next.deps);
+  assert.equal(next.inputs[0]!.mode, 'incremental');
+});
+test('a /review on a head that has its review is a re-check, not a refusal', async () => {
+  await published({ head: 'h1' });
+  const h = await manualJob({ own: [[{ id: '401', commit: 'h1' }]] });
+  await runReviewJob(h.job, h.deps);
+  assert.equal(h.writes.some((w) => w[0] === 'react' && w[2] === 'eyes'), true);
+  assert.equal(h.writes.some((w) => w[0] === 'react' && w[2] === 'confused'), false);
+  assert.equal(h.writes.some((w) => w[0] === 'comment' && String(w[1]).includes('was not started')), false);
+  assert.deepEqual([h.inputs[0]!.mode, h.inputs[0]!.history?.lastReview?.head, (await getJob(db, h.job.id))?.outcome], ['recheck', 'h1', 'published']);
+  assert.equal((await listRuns(db, REF)).at(-1)!.mode, 'recheck');
+});
+test('a /review on a head whose review was stored before this plan is a re-check too', async () => {
+  const old: Record<string, unknown> = { ...EARLIER_RESULT };
+  delete old['mode'];
+  await published({ head: 'h1', baseBranch: null, result: old });
+  const h = await manualJob({ own: [[{ id: '401', commit: 'h1' }]] });
+  await runReviewJob(h.job, h.deps);
+  assert.deepEqual([h.inputs[0]!.mode, (await getJob(db, h.job.id))?.outcome], ['recheck', 'published']);
+});
+test('a push on a head that has its review is still dropped', async () => {
+  await published({ head: 'h1' });
+  const h = await live({ own: [[{ id: '401', commit: 'h1' }]] });
+  await runReviewJob(h.job, h.deps);
+  assert.deepEqual([(await getJob(db, h.job.id))?.status, (await getJob(db, h.job.id))?.outcome, h.inputs.length], ['dropped', 'already_reviewed', 0]);
+});
+test('a /review on a head with a review the database does not know is still refused', async () => {
+  await published({ head: 'h1' });
+  const h = await manualJob({ own: [[{ id: '470', commit: 'h1' }, { id: '401', commit: 'h1' }]] });
+  await runReviewJob(h.job, h.deps);
+  assert.deepEqual([h.inputs.length, (await getJob(db, h.job.id))?.outcome], [0, 'refused']);
+  assert.deepEqual(h.writes.at(-1), ['comment', '@octo-lead The review was not started (`already_reviewed`).']);
+});
+test('a /review on a reviewed head does not post a leftover row of the review that is already there', async () => {
+  const leftover = await recorded({ headSha: 'h1', baseBranch: 'main' });
+  await published({ head: 'h1' });
+  const h = await manualJob({ own: [[{ id: '401', commit: 'h1' }]] });
+  await runReviewJob(h.job, h.deps);
+  assert.deepEqual([h.inputs.length, h.inputs[0]!.mode, (await getJob(db, h.job.id))?.outcome], [1, 'recheck', 'published']);
+  const runs = await listRuns(db, REF);
+  assert.equal(runs.find((r) => r.id === leftover)!.published, false);
+  assert.deepEqual([runs.length, runs.at(-1)!.published, runs.at(-1)!.mode], [3, true, 'recheck']);
+});
+test('a /review on a reviewed head publishes a stored review newer than the published one, as it was recorded', async () => {
+  await published({ head: 'h1' });
+  const waiting = await recorded({ headSha: 'h1', baseBranch: 'main', mode: 'incremental', result: okResult({ mode: 'incremental', since: 'h0' }) });
+  const stored = (await listRuns(db, REF)).find((r) => r.id === waiting)!;
+  const h = await manualJob({ own: [[{ id: '401', commit: 'h1' }]] });
+  await runReviewJob(h.job, h.deps);
+  assert.deepEqual([h.inputs.length, (await getJob(db, h.job.id))?.outcome], [0, 'published']);
+  const posts = h.writes.filter((w) => w[0] === 'publishReview');
+  assert.deepEqual(posts, [['publishReview', 'h1', stored.body, 1]]);
+  assert.equal(String(posts[0]![2]).split('\n')[0], stored.body.split('\n')[0]);
+  const after = (await listRuns(db, REF)).find((r) => r.id === waiting)!;
+  assert.deepEqual([after.published, after.mode], [true, 'incremental']);
+});
+test('a review the engine threw on is stored with the mode that was decided', async () => {
+  await published({ head: 'h0' });
+  const h = await live({ own: OWN_401 });
+  h.deps.review = () => Promise.reject(new Error('boom'));
+  await runReviewJob(h.job, h.deps);
+  const run = (await listRuns(db, REF)).at(-1)!;
+  assert.deepEqual([run.outcome, run.failureStage, run.mode], ['failed', 'engine', 'incremental']);
+});
+test('a re-check is not the last review: the next push is planned from the review before it', async () => {
+  await published({ head: 'h0', result: okResult({ overview: 'First.' }) });
+  const recheck = okResult({ mode: 'recheck', overview: 'Second.', scores: flaggedResult().scores, verdict: flaggedResult().verdict });
+  await published({ head: 'h0', mode: 'recheck', reviewId: '402', comments: [], result: recheck });
+  const h = await live({ own: [[{ id: '402', commit: 'h0' }, { id: '401', commit: 'h0' }]] });
+  await runReviewJob(h.job, h.deps);
+  assert.equal(h.inputs[0]!.history?.lastReview?.overview, 'First.');
+  assert.equal(h.inputs[0]!.history?.shown, shownOf(recheck));
+  assert.notEqual(shownOf(recheck), shownOf(okResult({ overview: 'First.' })));
+});
+test('with a scorer in force the history and the stored scores are the scorer\'s', async () => {
+  await published({ head: 'h0' });
+  const h = await live({ own: OWN_401, result: scoredResult({ mode: 'incremental' }) });
+  h.deps.engineDeps = () => ({ scorer: { score: () => Promise.reject(new Error('not_expected')) } }) as unknown as ReviewDeps;
+  await runReviewJob(h.job, h.deps);
+  assert.equal(h.inputs[0]!.history?.by, 'scorer');
+  assert.deepEqual((await blockRows()).map((r) => [r.hash, r.scored_by]), [['h', 'scorer']]);
+});
+test('with nothing new a push is finished without a review', async () => {
+  await published({ head: 'h0' });
+  const nothing = okResult({ nothingToDo: true, mode: 'incremental' });
+  const h = await live({ own: OWN_401, threads: [[THREAD]], result: nothing });
+  await runReviewJob(h.job, h.deps);
+  assert.deepEqual([(await getJob(db, h.job.id))?.status, (await getJob(db, h.job.id))?.outcome], ['done', 'nothing_new']);
+  const run = (await listRuns(db, REF)).at(-1)!;
+  assert.deepEqual([run.outcome, run.body, run.comments, run.published, run.mode], ['ok', '', [], false, 'incremental']);
+  assert.equal(h.writes.some((w) => w[0] === 'publishReview'), false);
+  assert.equal(h.writes.filter((w) => w[0] === 'listThreads').length, 1);
+  assert.equal(h.writes.some((w) => w[0] === 'react' || w[0] === 'comment'), false);
+});
+test('a second start on a head that had nothing new publishes nothing', async () => {
+  await published({ head: 'h0' });
+  const nothing = okResult({ nothingToDo: true, mode: 'incremental' });
+  const first = await live({ own: OWN_401, result: nothing });
+  await runReviewJob(first.job, first.deps);
+  const again = await live({ own: OWN_401, result: nothing });
+  await runReviewJob(again.job, again.deps);
+  assert.deepEqual([again.inputs.length, (await getJob(db, again.job.id))?.outcome], [1, 'nothing_new']);
+  assert.equal(again.writes.some((w) => w[0] === 'publishReview'), false);
+});
+test('with nothing new a command gets its review', async () => {
+  await published({ head: 'h0' });
+  const h = await manualJob({ own: OWN_401, result: okResult({ nothingToDo: true, mode: 'incremental' }) });
+  await runReviewJob(h.job, h.deps);
+  assert.equal((await getJob(db, h.job.id))?.outcome, 'published');
+  assert.equal(h.writes.filter((w) => w[0] === 'publishReview').length, 1);
+});
+test('a review with no model call that is not nothing new is published', async () => {
+  await published({ head: 'h0' });
+  const h = await live({ own: OWN_401, result: okResult({ mode: 'incremental', usage: NO_CALLS, coverage: { reviewed: [], notReviewed: [{ path: 'logo.bin', reason: 'no_diff' }] } }) });
+  await runReviewJob(h.job, h.deps);
+  assert.equal((await getJob(db, h.job.id))?.outcome, 'published');
+});
+test('the scores a run gave are stored for other pull requests', async () => {
+  const h = await live({ result: scoredResult() });
+  await runReviewJob(h.job, h.deps);
+  const [run] = await listRuns(db, REF);
+  assert.deepEqual((await blockRows()).map((r) => [r.run, r.number, r.path, r.hash, r.score, r.category, r.reason, r.scored_by, r.scored_at.toISOString()]),
+    [[run!.id, 7, 'a.ts', 'h', 80, 'calculation', '', 'model', run!.finishedAt]]);
+});
+test('a failure to store the scores changes nothing, and they are stored once', async () => {
+  const h = await live({ result: scoredResult() });
+  let attempts = 0;
+  const inner = h.deps.db;
+  h.deps.db = {
+    ...inner,
+    query: (text, params) => {
+      if (text.includes('insert into visto_ai.block_scores')) { attempts += 1; return Promise.reject(new Error('Something private broke')); }
+      return inner.query(text, params);
+    },
+  };
+  await runReviewJob(h.job, h.deps);
+  const runs = await listRuns(db, REF);
+  assert.deepEqual([(await getJob(db, h.job.id))?.outcome, runs.length, attempts, (await blockRows()).length], ['published', 1, 1, 0]);
+  assert.deepEqual(h.logged.filter((e) => e.event === 'scores_store_failed'), [{ event: 'scores_store_failed', job: h.job.id, run: runs[0]!.id, reason: 'internal_error' }]);
+});
+test('the scores of a run whose text could not be rendered are stored, and a resumed run stores none again', async () => {
+  const unrendered = await live({ renderThrows: true });
+  await runReviewJob(unrendered.job, unrendered.deps);
+  assert.equal((await getJob(db, unrendered.job.id))?.outcome, 'render_failed');
+  assert.deepEqual((await blockRows()).map((r) => [r.number, r.hash]), [[7, 'h']]);
+  const before = await live({ pullRequest: 8, result: scoredResult(), posts: [new Error('github_502')] });
+  await runReviewJob(before.job, before.deps);
+  const again = await live({ pullRequest: 8, reuseJob: before.job.id });
+  await runReviewJob(again.job, again.deps);
+  assert.deepEqual([again.inputs.length, (await getJob(db, again.job.id))?.outcome], [0, 'published']);
+  assert.deepEqual((await blockRows()).map((r) => [r.number, r.hash]), [[7, 'h'], [8, 'h']]);
+});
+test('the scores of a push with nothing new are stored', async () => {
+  await published({ head: 'h0' });
+  const h = await live({ own: OWN_401, result: scoredResult({ nothingToDo: true, mode: 'incremental' }) });
+  await runReviewJob(h.job, h.deps);
+  assert.equal((await getJob(db, h.job.id))?.outcome, 'nothing_new');
+  assert.deepEqual((await blockRows()).map((r) => [r.run, r.hash]), [[(await listRuns(db, REF)).at(-1)!.id, 'h']]);
+});
+test('the engine can look up scores other pull requests stored in the last 30 days', async () => {
+  const other = { ...REF, number: 8 };
+  const day = 86_400;
+  await recordBlockScores(db, 1, other, 'model', [{ path: 'src/a.ts', hash: 'k1', score: 60, category: 'calculation', reason: 'Totals.' }], at(-29 * day));
+  await recordBlockScores(db, 2, other, 'model', [{ path: 'src/a.ts', hash: 'k2', score: 50, category: 'fix', reason: 'Old.' }], at(-31 * day));
+  await recordBlockScores(db, 3, other, 'model', [{ path: 'src/a.ts', hash: 'k3', score: 40, category: 'made_up', reason: 'Odd.' }], at(-29 * day));
+  const h = await live();
+  await runReviewJob(h.job, h.deps);
+  const lookUp = h.engines[0]!.reusableScores!;
+  assert.deepEqual(await lookUp([{ path: 'src/a.ts', hash: 'k1' }, { path: 'src/a.ts', hash: 'k2' }, { path: 'src/a.ts', hash: 'k3' }]), [
+    { path: 'src/a.ts', hash: 'k1', entry: { score: 60, category: 'calculation', reason: 'Totals.' } },
+    { path: 'src/a.ts', hash: 'k3', entry: { score: 40, category: 'other', reason: 'Odd.' } },
+  ]);
+});
+test('in dry run nothing of this happens', async () => {
+  await published({ head: 'h0' });
+  const h = await harness({ dryRun: true, result: scoredResult() });
+  await runReviewJob(h.job, h.deps);
+  assert.deepEqual(['mode' in h.inputs[0]!, 'history' in h.inputs[0]!, 'reusableScores' in h.engines[0]!], [false, false, false]);
+  assert.deepEqual(await blockRows(), []);
+  assert.equal((await listRuns(db, REF)).at(-1)!.mode, 'full');
+});
+test('the review entry says the mode, the count and whether nothing was new', async () => {
+  await published({ head: 'h0' });
+  const h = await live({ own: OWN_401 });
+  await runReviewJob(h.job, h.deps);
+  const entry = h.logged.find((e) => e.event === 'review')!;
+  assert.deepEqual([entry.mode, entry.blocking_on_unchanged, entry.nothing_new], ['incremental', null, false]);
+  await published({ head: 'h0', pullRequest: 8 });
+  const full = await live({ pullRequest: 8, own: OWN_401, settings: { ...SETTINGS, newHead: 'full' }, result: okResult({ blockingOnUnchanged: 2 }) });
+  await runReviewJob(full.job, full.deps);
+  const later = full.logged.find((e) => e.event === 'review')!;
+  assert.deepEqual([later.mode, later.blocking_on_unchanged, later.nothing_new], ['full', 2, false]);
+  const nothing = await live({ pullRequest: 9, result: okResult({ nothingToDo: true, mode: 'incremental' }) });
+  await runReviewJob(nothing.job, nothing.deps);
+  assert.equal(nothing.logged.find((e) => e.event === 'review')!.nothing_new, true);
+});
+test('a review with nothing new whose text cannot be rendered still ends as nothing new', async () => {
+  await published({ head: 'h0' });
+  const h = await live({ own: OWN_401, renderThrows: true, result: { ...flaggedResult(), nothingToDo: true, mode: 'incremental' } });
+  await runReviewJob(h.job, h.deps);
+  assert.equal((await getJob(db, h.job.id))?.outcome, 'nothing_new');
+  assert.equal(h.logged.some((e) => e.event === 'render_failed'), true);
+  assert.equal(h.writes.some((w) => w[0] === 'publishReview'), false);
+});
+test('a review adopted late is the last review the mode is worked out from', async () => {
+  await recorded({ headSha: 'h0', result: EARLIER_RESULT, baseBranch: 'main' });
+  const h = await live({ own: [[{ id: '401', commit: 'h0' }]], threads: [[THREAD]] });
+  await runReviewJob(h.job, h.deps);
+  assert.deepEqual([h.inputs[0]!.mode, h.inputs[0]!.history?.lastReview?.head], ['incremental', 'h0']);
+});
+test('a write tried again that finds the job finished stores no scores under the run that was rolled back', async () => {
+  await published({ head: 'h0' });
+  const h = await live({ own: OWN_401, result: scoredResult({ nothingToDo: true, mode: 'incremental' }) });
+  const inner = h.deps.db;
+  let first = true;
+  h.deps.db = {
+    ...inner,
+    transaction: async (work) => {
+      let recordedRun = false;
+      try {
+        return await inner.transaction(async (tx) => {
+          const out = await work({ ...tx, query: (text, params) => { if (text.includes('insert into visto_ai.review_runs')) recordedRun = true; return tx.query(text, params); } });
+          if (first && recordedRun) throw new Error('db_down');
+          return out;
+        });
+      } catch (error) {
+        // Rolled back; before the write is tried again another start finishes the job.
+        if (first && recordedRun) { first = false; await finishJob(db, h.job.id, 'done', 'nothing_new', at(0)); }
+        throw error;
+      }
+    },
+  };
+  await runReviewJob(h.job, h.deps);
+  assert.equal(first, false);
+  assert.deepEqual(await blockRows(), []);
+  assert.equal(h.logged.some((e) => e.event === 'scores_store_failed'), false);
+});
+test('the review entry says nothing was new only when the job ended so', async () => {
+  await published({ head: 'h0' });
+  const h = await manualJob({ own: OWN_401, result: okResult({ nothingToDo: true, mode: 'incremental' }) });
+  await runReviewJob(h.job, h.deps);
+  assert.equal((await getJob(db, h.job.id))?.outcome, 'published');
+  assert.equal(h.logged.find((e) => e.event === 'review')!.nothing_new, false);
 });

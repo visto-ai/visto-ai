@@ -8,7 +8,7 @@ import { createSpendGuard } from './spend.ts';
 
 const REF = { service: 'github', owner: 'acme', repo: 'shop', number: 7 } as const;
 const run = (over: Partial<RunRecord> = {}): RunRecord => ({
-  ref: REF, job: null, trigger: 'automatic', mode: 'full', dryRun: true, headSha: 'h1', baseSha: 'b1',
+  ref: REF, job: null, trigger: 'automatic', mode: 'full', dryRun: true, headSha: 'h1', baseSha: 'b1', baseBranch: null,
   outcome: 'ok', failureStage: null, failureCode: null, needsHuman: false, highestScore: 35,
   body: 'text', comments: [], result: { findings: [] },
   usage: { calls: 2, inputTokens: 1000, outputTokens: 200, cachedTokens: 50, cost: 0.0375 },

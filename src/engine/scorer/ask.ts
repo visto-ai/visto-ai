@@ -57,7 +57,10 @@ export async function askScorer(args: {
   let stopCode = 'internal_error'; // the failure that stopped the files not yet started
   const settled = await inPool(contexts.length, SCORER_CONCURRENCY, ctl, async (i) => {
     const context = contexts[i]!;
-    const blocks = context.blocks.map((b) => b.id);
+    // A hunk that already has its score is not asked again; a file with none left is not asked at all.
+    const scored = context.kept?.scoredHunks;
+    const blocks = context.blocks.filter((b) => scored?.has(b.hunk) !== true).map((b) => b.id);
+    if (blocks.length === 0) return { context, blocks, answer: { blocks: {}, usage: noUsage(), failure: null } };
     const text = [SCORER_NOTE, header, fileSection(context, i + 1, contexts.length, args.token)].join('\n\n');
     let answer: ScoreAnswer;
     try {

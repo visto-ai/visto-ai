@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { hasHidden, inlineText, stripControl, wrapData } from './untrusted.ts';
+import { cutText, hasHidden, inlineText, stripControl, wrapData } from './untrusted.ts';
 
 test('removes bidirectional and zero-width characters and counts them', () => {
   assert.deepEqual(stripControl('a\u202eb\u200bc\u2066d'), { text: 'abcd', removed: 3 });
@@ -90,4 +90,11 @@ test('hasHidden is true only when stripping would remove something', () => {
   assert.equal(hasHidden('a\u202eb'), true);
   assert.equal(hasHidden('a\tb\r\nc'), false);
   assert.equal(hasHidden('plain'), false);
+});
+
+test('a long text is stripped, then cut at the limit it is given without splitting a surrogate pair', () => {
+  assert.equal(cutText('ab\u200bc', 3), 'abc');
+  assert.equal(cutText('abcdef', 4), 'abcd [cut]');
+  assert.equal(cutText('abc\ud83d\ude00z', 4), 'abc [cut]');
+  assert.equal(cutText('', 4), '');
 });

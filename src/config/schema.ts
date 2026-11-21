@@ -64,12 +64,16 @@ const limits = z
 
 const threshold = z.number().int().min(1).max(100);
 
+/** How a head after a review is reviewed. */
+const newHead = z.enum(['full', 'incremental']);
+
 const repoConfig = z
   .object({
     primaryBranches: z.array(z.string().min(1)).default(['main', 'master']),
     score: z.object({ threshold: threshold.default(70) }).strict().prefault({}),
     ignoredAuthors: z.array(z.string().min(1)).default(['dependabot[bot]']),
     baseBranches: z.array(z.string().min(1)).default([]),
+    newHead: newHead.optional(),
   })
   .strict();
 
@@ -79,6 +83,7 @@ const repoOverride = z
     score: z.object({ threshold: threshold.optional() }).strict().optional(),
     ignoredAuthors: z.array(z.string().min(1)).optional(),
     baseBranches: z.array(z.string().min(1)).optional(),
+    newHead: newHead.optional(),
   })
   .strict();
 

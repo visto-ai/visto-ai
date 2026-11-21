@@ -19,7 +19,7 @@ const config: DeploymentConfig = {
   scorer: null,
   app: null, database: null, server: { port: 8080 }, dryRun: false, alerts: null,
   limits: { inputTokensPerCall: 200_000, batchesPerReview: 6, spendPerDay: 50, queueConcurrency: 2 },
-  repositories: { defaults: { primaryBranches: ['main'], scoreThreshold: 70, ignoredAuthors: [], baseBranches: [] }, overrides: {} },
+  repositories: { defaults: { primaryBranches: ['main'], scoreThreshold: 70, ignoredAuthors: [], baseBranches: [], newHead: null }, overrides: {} },
 };
 
 const mkCase = (pr: number, extra: Partial<EvalCase> = {}): EvalCase => ({
