@@ -1,7 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { checkGuide, checkLinks, slugify } from './check.ts';
@@ -220,10 +219,30 @@ test('the README links every page', () => {
   }
 });
 
-test('no tracked file outside the history links to a gone README section or to docs/extensions.md', () => {
-  const files = execFileSync('git', ['ls-files', '*.md', '*.yml'], { encoding: 'utf8' })
-    .split('\n')
-    .filter((f) => f && !f.startsWith('docs/superpowers/'));
+/**
+ * The repository's Markdown and YAML files, found by walking the tree rather than asking git: CI runs the
+ * tests in a container that has no git. Dependencies, build output, hidden folders other than `.github`,
+ * and `docs/superpowers` (history, left as it was written) are skipped.
+ */
+function repoFiles(dir = '.'): string[] {
+  const skip = new Set(['node_modules', 'dist', 'coverage']);
+  const out: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const path = dir === '.' ? entry.name : `${dir}/${entry.name}`;
+    if (entry.isDirectory()) {
+      if (skip.has(entry.name) || (entry.name.startsWith('.') && entry.name !== '.github')) continue;
+      if (path === 'docs/superpowers') continue;
+      out.push(...repoFiles(path));
+    } else if (/\.(md|yml)$/.test(entry.name)) {
+      out.push(path);
+    }
+  }
+  return out;
+}
+
+test('no file outside the history links to a gone README section or to docs/extensions.md', () => {
+  const files = repoFiles();
+  assert.ok(files.includes('README.md') && files.includes('docs/guide/index.md'), 'the walk found the repository');
   for (const file of files) {
     assert.deepEqual(checkLinks(file, '.'), [], file);
     assert.ok(!readFileSync(file, 'utf8').includes('docs/extensions.md'), `${file} names docs/extensions.md`);
